@@ -22,14 +22,14 @@ eye, using explicit, auditable detection rules instead of a black-box model.
 - CLI tool for quick PCAP analysis
 
 ## Installation
-\`\`\`bash
+```bash
 pip install -r requirements.txt
-\`\`\`
+```
 
 ## Usage
-\`\`\`bash
+```bash
 python -m pcap-rca.cli analyze path/to/capture.pcap
-\`\`\`
+```
 
 ## Architecture
 See [docs/architecture.md](docs/architecture.md) for the full pipeline.
