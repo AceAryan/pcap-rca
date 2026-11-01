@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Captures and derived data: recreate with data/scripts/
+data/raw/
+data/synthetic/
+data/processed/

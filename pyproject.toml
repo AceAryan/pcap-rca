@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcap-rca"
+version = "0.1.0"
+description = "Rule-based network event detection and root-cause inference for PCAP traffic"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["dpkt>=1.9.8"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+pcap-rca = "pcap_rca.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pcap_rca*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
