@@ -190,13 +190,6 @@ class FlowTable:
         self._fragments: dict[tuple, Flow] = {}  # (src, dst, proto, ip_id) -> flow
         self._icmp_related: dict[int, Flow] = {}  # ICMP error frame -> flow
 
-    @classmethod
-    def from_packets(cls, packets: Iterable[Packet], **kwargs) -> "FlowTable":
-        table = cls(**kwargs)
-        for pkt in packets:
-            table.add(pkt)
-        return table
-
     # -- lookups ------------------------------------------------------------
 
     def related_flow(self, icmp_error: Packet) -> Flow | None:
@@ -291,4 +284,8 @@ class FlowTable:
 
 
 def build_flows(packets: Iterable[Packet], **kwargs) -> FlowTable:
-    return FlowTable.from_packets(packets, **kwargs)
+    """Assign packets (in capture order) to flows; kwargs go to FlowTable."""
+    table = FlowTable(**kwargs)
+    for pkt in packets:
+        table.add(pkt)
+    return table

@@ -9,11 +9,9 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 
-from ..detectors.base import Capture, Config, Event
+from ..detectors.base import SEVERITY_RANK, Capture, Config, Event
 from .spatial import endpoint, group_events, prefix, scope_of
 from .temporal import temporal_pattern
-
-_SEVERITY_RANK = {"info": 0, "warning": 1, "error": 2}
 
 
 @dataclass
@@ -51,7 +49,7 @@ class EventGroup:
 
     @property
     def severity(self) -> str:
-        return max((e.severity for e in self.events), key=_SEVERITY_RANK.get)
+        return max((e.severity for e in self.events), key=SEVERITY_RANK.get)
 
     @property
     def subtypes(self) -> Counter:
@@ -80,7 +78,7 @@ def aggregate(events: list[Event], capture: Capture, cfg: Config | None = None) 
     """Default grouping of all events, most severe and largest first."""
     cfg = cfg or Config()
     groups = [make_group(evs, capture, cfg) for evs in group_events(events, capture, cfg)]
-    groups.sort(key=lambda g: (-_SEVERITY_RANK[g.severity], -g.count, g.event_type))
+    groups.sort(key=lambda g: (-SEVERITY_RANK[g.severity], -g.count, g.event_type))
     return groups
 
 

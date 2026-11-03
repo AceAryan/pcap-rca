@@ -31,9 +31,11 @@ def prefix(ip: str | None) -> str:
 
 
 def endpoint(ip: str | None, port: int | None) -> str:
+    if ip is None:
+        return "?"
     if port is None:
-        return str(ip)
-    return f"[{ip}]:{port}" if ip and ":" in ip else f"{ip}:{port}"
+        return ip
+    return f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
 
 
 def _flows_of_protocols(events, capture) -> int:

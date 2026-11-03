@@ -11,7 +11,7 @@ import json
 import sys
 from collections import Counter
 
-from .aggregation import aggregate
+from .aggregation import aggregate, endpoint
 from .detectors import DETECTORS, SEVERITY_RANK, Capture, Event, run_detectors
 from .features import FLOW_FIELDS, PACKET_FIELDS, flow_rows, packet_rows, write_csv
 from .inference import infer
@@ -53,14 +53,6 @@ def cmd_features(args) -> int:
         n = write_csv(packet_rows(packets, table), args.packets, PACKET_FIELDS)
         print(f"  wrote {n:,} packet rows to {args.packets}")
     return 0
-
-
-def _endpoint(ip, port) -> str:
-    if ip is None:
-        return "?"
-    if port is None:
-        return ip
-    return f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
 
 
 def _short_metrics(e: Event, limit: int = 4) -> str:
@@ -134,7 +126,7 @@ def cmd_analyze(args) -> int:
                   f"({len(shown)} of {len(events)}), time relative to capture start:")
             for e in shown:
                 name = e.event_type + (f"[{e.subtype}]" if e.subtype else "")
-                route = f"{_endpoint(e.src, e.sport)} -> {_endpoint(e.dst, e.dport)}"
+                route = f"{endpoint(e.src, e.sport)} -> {endpoint(e.dst, e.dport)}"
                 print(f"  {e.ts_start - start:9.3f}s  {e.severity:7}  {name:38} {route:44} {_short_metrics(e)}")
 
     if args.json:
@@ -161,31 +153,30 @@ def cmd_analyze(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("capture", help="pcap or pcapng file")
+    common.add_argument("--dedup-window", type=float, default=0.005,
+                        help="seconds within which an identical IPv4 datagram is a capture "
+                             "duplicate (0 disables; default 0.005)")
+
     p = argparse.ArgumentParser(prog="pcap-rca", description="PCAP root-cause analysis")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sp = sub.add_parser("analyze", help="detect network events and infer root causes")
-    sp.add_argument("capture", help="pcap or pcapng file")
+    sp = sub.add_parser("analyze", parents=[common],
+                        help="detect network events and infer root causes")
     sp.add_argument("--json", metavar="PATH", help="write all events as JSON")
     sp.add_argument("--csv", metavar="PATH", help="write all events as CSV")
     sp.add_argument("--only", metavar="LIST",
-                    help="comma-separated detectors to run: " + ",".join(d.name for d in DETECTORS))
+                    help="comma-separated detectors to run: " + ",".join(DETECTORS))
     sp.add_argument("--min-severity", choices=list(SEVERITY_RANK), default="info")
     sp.add_argument("--limit", type=int, default=20, help="events to list on screen (default 20)")
-    sp.add_argument("--dedup-window", type=float, default=0.005,
-                    help="seconds within which an identical IPv4 datagram is a capture "
-                         "duplicate (0 disables; default 0.005)")
     sp.set_defaults(func=cmd_analyze)
 
-    sp = sub.add_parser("features", help="extract packet and flow features")
-    sp.add_argument("capture", help="pcap or pcapng file")
+    sp = sub.add_parser("features", parents=[common], help="extract packet and flow features")
     sp.add_argument("--flows", metavar="CSV", help="write one row per flow")
     sp.add_argument("--packets", metavar="CSV", help="write one row per packet")
     sp.add_argument("--idle-timeout", type=float, default=120.0,
                     help="seconds of silence that end a UDP/other flow (default 120)")
-    sp.add_argument("--dedup-window", type=float, default=0.005,
-                    help="seconds within which an identical IPv4 datagram is a capture "
-                         "duplicate (0 disables; default 0.005)")
     sp.set_defaults(func=cmd_features)
 
     args = p.parse_args(argv)

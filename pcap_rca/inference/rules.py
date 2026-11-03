@@ -22,12 +22,11 @@ from dataclasses import asdict, dataclass, field
 from statistics import fmean, median, pstdev
 
 from ..aggregation import EventGroup, endpoint, make_group, prefix
-from ..detectors.base import Capture, Config, Event
-from ..parser import TCP
+from ..detectors.base import SEVERITY_RANK, Capture, Config, Event, direction_index
+from ..parser import ACK, TCP
 
 LOW, MEDIUM, HIGH = "low", "medium", "high"
 _CONFIDENCE_RANK = {LOW: 0, MEDIUM: 1, HIGH: 2}
-_SEVERITY_RANK = {"info": 0, "warning": 1, "error": 2}
 
 TITLES = {
     "SCAN_OR_FLOOD": "Scan-like connection pattern (scan, flood or peer-to-peer), not a fault",
@@ -195,7 +194,7 @@ class _Context:
         total = 0
         for stream, direction in flow_dirs:
             flow = self.capture.table.flows[stream]
-            d = 0 if direction == "c2s" else 1
+            d = direction_index(direction)
             total += sum(1 for p, pd in zip(flow.packets, flow.directions)
                          if pd == d and p.payload_len > 0)
         return total
@@ -521,8 +520,7 @@ def pmtu_blackhole(ctx: _Context) -> None:
         flow = ctx.capture.table.flows[stream]
         if flow.tcp is None or not flow.tcp.established:
             continue
-        direction = evs[0].metrics["direction"]
-        d = 0 if direction == "c2s" else 1
+        d = direction_index(evs[0].metrics["direction"])
         sent = [p for p, pd in zip(flow.packets, flow.directions) if pd == d and p.payload_len]
         if not sent:
             continue  # only bare FINs were resent
@@ -532,9 +530,11 @@ def pmtu_blackhole(ctx: _Context) -> None:
         # Stalled: the peer never ACKs past the first resent segment.
         first_seq = min(e.metrics["seq"] for e in evs)
         isn = flow.tcp.isn(d)
+        if isn is None:
+            continue  # SYN not captured: can't make the ACKs relative
         acks = [(p.tcp_ack - isn) % 2**32 for p, pd in zip(flow.packets, flow.directions)
-                if pd != d and p.tcp_flags & 0x10 and p.ts >= evs[0].ts_start]
-        if isn is None or any(a > first_seq for a in acks):
+                if pd != d and p.tcp_flags & ACK and p.ts >= evs[0].ts_start]
+        if any(a > first_seq for a in acks):
             continue
         sizes = sorted({e.metrics["len"] for e in evs})
         ctx.add("PMTU_BLACKHOLE", evs, endpoint(flow.server[0], flow.server[1]), HIGH, [
@@ -737,5 +737,5 @@ def infer(capture: Capture, events: list[Event], config: Config | None = None) -
                 d.confidence = _lower(d.confidence)
                 d.evidence.append("Confidence lowered: the capture itself lost packets")
     ctx.diagnoses.sort(key=lambda d: (-_CONFIDENCE_RANK[d.confidence],
-                                      -_SEVERITY_RANK[d.severity], -d.event_count))
+                                      -SEVERITY_RANK[d.severity], -d.event_count))
     return ctx.diagnoses

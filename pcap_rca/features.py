@@ -15,7 +15,7 @@ from statistics import fmean, pstdev
 from typing import Iterable, Iterator
 
 from .parser import ACK, CWR, ECE, FIN, PROTO_NAMES, PSH, RST, SYN, URG, Packet, flag_str
-from .streams import C2S, Flow, FlowTable
+from .streams import C2S, S2C, Flow, FlowTable
 
 PACKET_FIELDS = [
     "frame", "ts", "rel_time", "flow_id", "direction",
@@ -126,8 +126,8 @@ def flow_features(flow: Flow) -> dict:
         row.update({
             "tcp_syn_count": t.syn_count, "tcp_synack_count": t.synack_count,
             "tcp_established": t.established, "tcp_irtt": t.irtt,
-            "tcp_mss_client": t.mss[C2S], "tcp_mss_server": t.mss[1 - C2S],
-            "tcp_wscale_client": t.wscale[C2S], "tcp_wscale_server": t.wscale[1 - C2S],
+            "tcp_mss_client": t.mss[C2S], "tcp_mss_server": t.mss[S2C],
+            "tcp_wscale_client": t.wscale[C2S], "tcp_wscale_server": t.wscale[S2C],
             "tcp_close": t.close_reason or "open",
             "tcp_rst_by": None if t.rst_dir is None else ("client" if t.rst_dir == C2S else "server"),
         })

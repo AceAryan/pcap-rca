@@ -5,14 +5,14 @@
 """
 from __future__ import annotations
 
-from .app_events import AppEventDetector
-from .base import ERROR, INFO, WARNING, Capture, Config, Event
-from .dns_events import DnsEventDetector
-from .icmp_events import IcmpEventDetector
-from .tcp_events import TcpEventDetector
+from .app_events import detect_app_events
+from .base import ERROR, INFO, SEVERITY_RANK, WARNING, Capture, Config, Event, sort_events
+from .dns_events import detect_dns_events
+from .icmp_events import detect_icmp_events
+from .tcp_events import detect_tcp_events
 
-DETECTORS = [TcpEventDetector(), DnsEventDetector(), IcmpEventDetector(), AppEventDetector()]
-SEVERITY_RANK = {INFO: 0, WARNING: 1, ERROR: 2}
+DETECTORS = {"tcp": detect_tcp_events, "dns": detect_dns_events,
+             "icmp": detect_icmp_events, "app": detect_app_events}
 
 
 def run_detectors(capture: Capture, config: Config | None = None,
@@ -20,11 +20,10 @@ def run_detectors(capture: Capture, config: Config | None = None,
     """Run every detector (or those named in `only`), events sorted by time."""
     cfg = config or Config()
     events: list[Event] = []
-    for detector in DETECTORS:
-        if only is None or detector.name in only:
-            events.extend(detector.detect(capture, cfg))
-    events.sort(key=lambda e: (e.ts_start, e.stream_id if e.stream_id is not None else -1))
-    return events
+    for name, detect in DETECTORS.items():
+        if only is None or name in only:
+            events.extend(detect(capture, cfg))
+    return sort_events(events)
 
 
 __all__ = ["Capture", "Config", "DETECTORS", "ERROR", "Event", "INFO", "SEVERITY_RANK",

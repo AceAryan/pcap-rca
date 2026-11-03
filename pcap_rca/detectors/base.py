@@ -7,9 +7,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..parser import Packet, ParseStats, load_packets
-from ..streams import C2S, Flow, FlowTable, build_flows
+from ..streams import C2S, S2C, Flow, FlowTable, build_flows
 
 INFO, WARNING, ERROR = "info", "warning", "error"
+SEVERITY_RANK = {INFO: 0, WARNING: 1, ERROR: 2}
 
 
 @dataclass
@@ -106,3 +107,19 @@ def flow_event(flow: Flow, event_type: str, severity: str, ts_start: float,
 
 def direction_name(direction: int) -> str:
     return "c2s" if direction == C2S else "s2c"
+
+
+def direction_index(name: str) -> int:
+    """Inverse of direction_name: 'c2s' -> C2S, 's2c' -> S2C."""
+    return C2S if name == "c2s" else S2C
+
+
+def side_name(direction: int) -> str:
+    """Which endpoint sent a packet travelling in `direction`."""
+    return "client" if direction == C2S else "server"
+
+
+def sort_events(events: list[Event]) -> list[Event]:
+    """Sort in place by start time, then stream; returns the list."""
+    events.sort(key=lambda e: (e.ts_start, e.stream_id if e.stream_id is not None else -1))
+    return events

@@ -27,7 +27,9 @@ from statistics import median
 
 from ..parser import ACK, FIN, RST, SYN, Packet
 from ..streams import C2S, S2C, Flow
-from .base import ERROR, INFO, WARNING, Capture, Config, Event, direction_name, flow_event
+from ..aggregation.spatial import prefix
+from .base import (ERROR, INFO, WARNING, Capture, Config, Event, direction_name, flow_event,
+                   side_name, sort_events)
 
 MOD = 2**32
 HALF = 2**31
@@ -213,7 +215,7 @@ class _Walk:
         self.event("TCP_ZERO_WINDOW", WARNING, me.zw_since, ts_end=ts,
                    count=len(me.zw_frames),
                    evidence=me.zw_frames + ([frame] if frame else []),
-                   metrics={"advertised_by": "client" if d == C2S else "server",
+                   metrics={"advertised_by": side_name(d),
                             "duration": ts - me.zw_since, "probes": me.zw_probes,
                             "reopened": reopened})
         me.zw_since, me.zw_frames = None, []
@@ -372,7 +374,7 @@ class _Walk:
             subtype, severity = None, WARNING if recent_data or unacked else INFO
         self.event("TCP_RST_MIDSTREAM", severity, p.ts, subtype=subtype,
                    evidence=[p.frame],
-                   metrics={"sender": "client" if d == C2S else "server",
+                   metrics={"sender": side_name(d),
                             "bytes_before_reset": data_before,
                             "idle_before_reset": p.ts - prev_ts if prev_ts is not None else None,
                             "unacked_data": unacked})
@@ -458,12 +460,6 @@ def _handshake_events(flow: Flow, cfg: Config, capture_end: float) -> list[Event
     return []
 
 
-def _prefix(ip: str) -> str:
-    if ":" in ip:
-        return ":".join(ip.split(":")[:4])  # roughly a /64
-    return ip.rsplit(".", 1)[0]  # /24
-
-
 def _high_rtt_events(flows: list[Flow], cfg: Config) -> list[Event]:
     # Karn's rule: a handshake whose SYN or SYN-ACK was retransmitted measures
     # the retransmission timeout, not the path, so it gives no RTT sample.
@@ -472,7 +468,7 @@ def _high_rtt_events(flows: list[Flow], cfg: Config) -> list[Event]:
                 and f.tcp.syn_count == 1 and f.tcp.synack_count == 1]
     by_prefix: dict[str, list[float]] = {}
     for f, rtt in measured:
-        by_prefix.setdefault(_prefix(f.server[0]), []).append(rtt)
+        by_prefix.setdefault(prefix(f.server[0]), []).append(rtt)
 
     baselines = {net: median(samples) * 1000 if len(samples) >= cfg.rtt_baseline_min else None
                  for net, samples in by_prefix.items()}  # once per prefix, not per flow
@@ -480,7 +476,7 @@ def _high_rtt_events(flows: list[Flow], cfg: Config) -> list[Event]:
     events = []
     for f, rtt in measured:
         ms = rtt * 1000
-        baseline = baselines[_prefix(f.server[0])]
+        baseline = baselines[prefix(f.server[0])]
         if ms > cfg.high_rtt_ms:
             rule = "absolute"
         elif (baseline is not None and ms >= cfg.high_rtt_floor_ms
@@ -497,22 +493,14 @@ def _high_rtt_events(flows: list[Flow], cfg: Config) -> list[Event]:
 
 # --------------------------------------------------------------------------
 
-class TcpEventDetector:
-    name = "tcp"
-
-    def detect(self, capture: Capture, config: Config | None = None) -> list[Event]:
-        cfg = config or Config()
-        end = capture.end_ts if capture.end_ts is not None else 0.0
-        events: list[Event] = []
-        for flow in capture.table.flows:
-            if flow.tcp is None or not flow.packets:
-                continue
-            events.extend(_handshake_events(flow, cfg, end))
-            events.extend(_Walk(flow, cfg).run())
-        events.extend(_high_rtt_events(capture.table.flows, cfg))
-        events.sort(key=lambda e: (e.ts_start, e.stream_id if e.stream_id is not None else -1))
-        return events
-
-
 def detect_tcp_events(capture: Capture, config: Config | None = None) -> list[Event]:
-    return TcpEventDetector().detect(capture, config)
+    cfg = config or Config()
+    end = capture.end_ts if capture.end_ts is not None else 0.0
+    events: list[Event] = []
+    for flow in capture.table.flows:
+        if flow.tcp is None or not flow.packets:
+            continue
+        events.extend(_handshake_events(flow, cfg, end))
+        events.extend(_Walk(flow, cfg).run())
+    events.extend(_high_rtt_events(capture.table.flows, cfg))
+    return sort_events(events)

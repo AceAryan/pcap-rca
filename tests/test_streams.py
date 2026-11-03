@@ -3,7 +3,7 @@ import struct
 import pytest
 
 from builders import (ACK, DATA_DIR, FIN, PSH, RST, SYN, dns_message, eth, icmp, ipv4,
-                      syn_options, tcp, tcp4, udp, udp4, write_pcap)
+                      syn_options, tcp4, udp, udp4, write_pcap)
 from pcap_rca.parser import load_packets
 from pcap_rca.streams import C2S, S2C, build_flows
 

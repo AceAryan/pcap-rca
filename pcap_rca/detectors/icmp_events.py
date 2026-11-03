@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from ..parser import ICMP, ICMPV6, Packet
 from ..streams import Flow
-from .base import ERROR, INFO, WARNING, Capture, Config, Event
+from .base import ERROR, INFO, WARNING, Capture, Config, Event, sort_events
 
 TRACEROUTE_PORTS = range(33434, 33535)  # classic UDP traceroute destination ports
 LOOP_MIN_TTL = 32  # OS default TTLs are 64/128/255; traceroute stops at 30 hops
@@ -83,49 +83,41 @@ def _ttl_subtype(err: Packet, original: Packet | None) -> str:
     return "unknown"
 
 
-class IcmpEventDetector:
-    name = "icmp"
-
-    def detect(self, capture: Capture, config: Config | None = None) -> list[Event]:
-        table = capture.table
-        events: list[Event] = []
-        for err in table.icmp_errors:
-            event_type = classify(err)
-            if event_type is None:
-                continue
-            q = err.icmp_quoted
-            flow = table.related_flow(err)
-            original = _original(err, flow)
-            severity = SEVERITY[event_type]
-            subtype = None
-            metrics = {"icmp_type": err.icmp_type, "icmp_code": err.icmp_code}
-
-            if event_type == "ICMP_TTL_EXCEEDED":
-                subtype = _ttl_subtype(err, original)
-                if original is not None:
-                    metrics["original_ttl"] = original.ttl
-                if subtype == "traceroute":
-                    severity = INFO
-            elif event_type == "ICMP_PORT_UNREACHABLE" and q.dport in TRACEROUTE_PORTS:
-                subtype, severity = "traceroute", INFO  # a traceroute's final hop
-            elif event_type == "ICMP_FRAG_NEEDED":
-                metrics["next_hop_mtu"] = err.icmp_mtu
-                if original is not None:
-                    metrics["original_size"] = original.ip_len
-
-            evidence = [err.frame] + ([original.frame] if original is not None else [])
-            events.append(Event(
-                event_type=event_type, severity=severity, ts_start=err.ts, ts_end=err.ts,
-                src=q.src, sport=q.sport, dst=q.dst, dport=q.dport, proto=q.proto,
-                stream_id=flow.id if flow is not None else None, subtype=subtype,
-                evidence=evidence,
-                related={"reporter": err.src,
-                         "original_frame": original.frame if original is not None else None},
-                metrics=metrics,
-            ))
-        events.sort(key=lambda e: e.ts_start)
-        return events
-
-
 def detect_icmp_events(capture: Capture, config: Config | None = None) -> list[Event]:
-    return IcmpEventDetector().detect(capture, config)
+    table = capture.table
+    events: list[Event] = []
+    for err in table.icmp_errors:
+        event_type = classify(err)
+        if event_type is None:
+            continue
+        q = err.icmp_quoted
+        flow = table.related_flow(err)
+        original = _original(err, flow)
+        severity = SEVERITY[event_type]
+        subtype = None
+        metrics = {"icmp_type": err.icmp_type, "icmp_code": err.icmp_code}
+
+        if event_type == "ICMP_TTL_EXCEEDED":
+            subtype = _ttl_subtype(err, original)
+            if original is not None:
+                metrics["original_ttl"] = original.ttl
+            if subtype == "traceroute":
+                severity = INFO
+        elif event_type == "ICMP_PORT_UNREACHABLE" and q.dport in TRACEROUTE_PORTS:
+            subtype, severity = "traceroute", INFO  # a traceroute's final hop
+        elif event_type == "ICMP_FRAG_NEEDED":
+            metrics["next_hop_mtu"] = err.icmp_mtu
+            if original is not None:
+                metrics["original_size"] = original.ip_len
+
+        evidence = [err.frame] + ([original.frame] if original is not None else [])
+        events.append(Event(
+            event_type=event_type, severity=severity, ts_start=err.ts, ts_end=err.ts,
+            src=q.src, sport=q.sport, dst=q.dst, dport=q.dport, proto=q.proto,
+            stream_id=flow.id if flow is not None else None, subtype=subtype,
+            evidence=evidence,
+            related={"reporter": err.src,
+                     "original_frame": original.frame if original is not None else None},
+            metrics=metrics,
+        ))
+    return sort_events(events)

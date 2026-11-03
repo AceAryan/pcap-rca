@@ -17,7 +17,7 @@ from collections import deque
 
 from ..parser import FIN, RST
 from ..streams import C2S, Flow
-from .base import ERROR, INFO, WARNING, Capture, Config, Event, flow_event
+from .base import ERROR, INFO, WARNING, Capture, Config, Event, flow_event, side_name, sort_events
 
 HTTP_METHODS = (b"GET ", b"POST ", b"PUT ", b"HEAD ", b"DELETE ", b"OPTIONS ", b"PATCH ",
                 b"CONNECT ", b"TRACE ")
@@ -112,16 +112,13 @@ def _tls_events(flow: Flow, cfg: Config, capture_end: float) -> list[Event]:
     if client_hello is None:
         return []
 
-    def side(d: int) -> str:
-        return "client" if d == C2S else "server"
-
     if alert is not None:
         p, d = alert
         code = p.payload_head[6]
         return [flow_event(flow, "TLS_HANDSHAKE_FAILURE", ERROR, client_hello.ts, p.ts,
                            subtype="alert", evidence=[client_hello.frame, p.frame],
                            metrics={"alert": TLS_ALERTS.get(code, f"alert_{code}"),
-                                    "alert_code": code, "sent_by": side(d),
+                                    "alert_code": code, "sent_by": side_name(d),
                                     "server_hello": server_hello is not None})]
     if server_hello is not None:
         return []
@@ -132,7 +129,7 @@ def _tls_events(flow: Flow, cfg: Config, capture_end: float) -> list[Event]:
         p, d = closes[0]
         return [flow_event(flow, "TLS_HANDSHAKE_FAILURE", ERROR, client_hello.ts, p.ts,
                            subtype="no_server_hello", evidence=[client_hello.frame, p.frame],
-                           metrics={"closed_by": side(d),
+                           metrics={"closed_by": side_name(d),
                                     "waited": p.ts - client_hello.ts,
                                     "reset": bool(p.tcp_flags & RST)})]
     if capture_end - client_hello.ts >= cfg.tls_handshake_timeout:
@@ -143,21 +140,13 @@ def _tls_events(flow: Flow, cfg: Config, capture_end: float) -> list[Event]:
     return []
 
 
-class AppEventDetector:
-    name = "app"
-
-    def detect(self, capture: Capture, config: Config | None = None) -> list[Event]:
-        cfg = config or Config()
-        end = capture.end_ts if capture.end_ts is not None else 0.0
-        events: list[Event] = []
-        for flow in capture.table.flows:
-            if flow.tcp is None:
-                continue
-            events.extend(_http_events(flow, cfg))
-            events.extend(_tls_events(flow, cfg, end))
-        events.sort(key=lambda e: (e.ts_start, e.stream_id if e.stream_id is not None else -1))
-        return events
-
-
 def detect_app_events(capture: Capture, config: Config | None = None) -> list[Event]:
-    return AppEventDetector().detect(capture, config)
+    cfg = config or Config()
+    end = capture.end_ts if capture.end_ts is not None else 0.0
+    events: list[Event] = []
+    for flow in capture.table.flows:
+        if flow.tcp is None:
+            continue
+        events.extend(_http_events(flow, cfg))
+        events.extend(_tls_events(flow, cfg, end))
+    return sort_events(events)
