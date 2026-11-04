@@ -13,7 +13,7 @@ from collections import Counter
 
 from .aggregation import aggregate, endpoint
 from .detectors import DETECTORS, SEVERITY_RANK, Capture, Event, run_detectors
-from .features import FLOW_FIELDS, PACKET_FIELDS, flow_rows, packet_rows, write_csv
+from .features import EVENT_FIELDS, FLOW_FIELDS, PACKET_FIELDS, flow_rows, packet_rows, write_csv
 from .inference import infer
 from .parser import PROTO_NAMES, UnsupportedCapture, load_packets
 from .streams import build_flows
@@ -47,12 +47,34 @@ def cmd_features(args) -> int:
           f"DNS messages {sum(1 for p in packets if p.dns is not None):,}")
 
     if args.flows:
-        n = write_csv(flow_rows(table), args.flows, FLOW_FIELDS)
+        if args.no_events:
+            rows, fields = flow_rows(table), FLOW_FIELDS
+        else:
+            capture = Capture(packets, table, stats)
+            rows, fields = flow_rows(table, run_detectors(capture)), FLOW_FIELDS + EVENT_FIELDS
+        n = write_csv(rows, args.flows, fields)
         print(f"  wrote {n:,} flow rows to {args.flows}")
     if args.packets:
         n = write_csv(packet_rows(packets, table), args.packets, PACKET_FIELDS)
         print(f"  wrote {n:,} packet rows to {args.packets}")
     return 0
+
+
+def cmd_dataset(args) -> int:
+    from .dataset import build, cap_per_label, fields, summarize
+    if not (args.synthetic or args.cic or args.captures):
+        print("error: give at least one of --synthetic, --cic, --captures", file=sys.stderr)
+        return 1
+    rows = list(build(args.synthetic or (), args.cic or (), args.captures or (),
+                      args.test_fraction, args.keep_identifiers,
+                      progress=lambda msg: print(msg, file=sys.stderr)))
+    if args.max_per_label:
+        rows = cap_per_label(rows, args.max_per_label)
+    n = write_csv(rows, args.output, fields(args.keep_identifiers))
+    print(f"wrote {n:,} flow rows to {args.output}")
+    print(summarize(rows))
+    return 0
+
 
 
 def _short_metrics(e: Event, limit: int = 4) -> str:
@@ -162,6 +184,21 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="pcap-rca", description="PCAP root-cause analysis")
     sub = p.add_subparsers(dest="command", required=True)
 
+    sp = sub.add_parser("dataset", help="build a labelled per-flow dataset for ML")
+    sp.add_argument("output", help="CSV file to write")
+    sp.add_argument("--synthetic", metavar="DIR", action="append",
+                    help="folder of capture_faults.sh output (<name>.pcap + <name>.json); repeatable")
+    sp.add_argument("--cic", metavar="CAPTURE", nargs="+",
+                    help="CIC-IDS2017 slices, labelled from the attack schedule")
+    sp.add_argument("--captures", metavar="CAPTURE", nargs="+", help="unlabelled captures")
+    sp.add_argument("--test-fraction", type=float, default=0.2,
+                    help="share of captures (not rows) put in the test split (default 0.2)")
+    sp.add_argument("--keep-identifiers", action="store_true",
+                    help="keep addresses, ports, timestamps (for analysis, not for training)")
+    sp.add_argument("--max-per-label", type=int, metavar="N",
+                    help="keep at most N rows per label in each split (thins the CIC floods)")
+    sp.set_defaults(func=cmd_dataset)
+
     sp = sub.add_parser("analyze", parents=[common],
                         help="detect network events and infer root causes")
     sp.add_argument("--json", metavar="PATH", help="write all events as JSON")
@@ -175,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     sp = sub.add_parser("features", parents=[common], help="extract packet and flow features")
     sp.add_argument("--flows", metavar="CSV", help="write one row per flow")
     sp.add_argument("--packets", metavar="CSV", help="write one row per packet")
+    sp.add_argument("--no-events", action="store_true",
+                    help="flow rows without the per-flow event counts (faster; skips detectors)")
     sp.add_argument("--idle-timeout", type=float, default=120.0,
                     help="seconds of silence that end a UDP/other flow (default 120)")
     sp.set_defaults(func=cmd_features)

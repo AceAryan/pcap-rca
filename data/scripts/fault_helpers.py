@@ -89,6 +89,29 @@ def tls_server(args):
             conn.close()
 
 
+def login_server(args):
+    """Minimal FTP-style login dialogue: 220 greeting, USER -> 331, PASS -> 230
+    for the right password, else 530."""
+    def serve(conn):
+        with conn, conn.makefile("rwb", buffering=0) as f:
+            f.write(b"220 pcap-rca FTP ready\r\n")
+            for line in f:
+                cmd = line.strip().split(b" ", 1)
+                if cmd[0].upper() == b"USER":
+                    f.write(b"331 Password required\r\n")
+                elif cmd[0].upper() == b"PASS":
+                    ok = len(cmd) > 1 and cmd[1] == args.password.encode()
+                    f.write(b"230 Login successful\r\n" if ok else b"530 Login incorrect\r\n")
+                elif cmd[0].upper() == b"QUIT":
+                    f.write(b"221 Bye\r\n")
+                    return
+
+    srv = socket.create_server((args.bind, args.port))
+    while True:
+        conn, _ = srv.accept()
+        threading.Thread(target=serve, args=(conn,), daemon=True).start()
+
+
 def sink_server(args):
     """Read and discard whatever clients upload."""
     def drain(conn):
@@ -267,6 +290,31 @@ def tls_connect(args):
         time.sleep(args.gap)
 
 
+def guess_logins(args):
+    """Password guessing like FTP-Patator: several guesses per connection;
+    with --last-correct the very last guess is the right password."""
+    total = args.connections * args.per_connection
+    n = 0
+    for _ in range(args.connections):
+        try:
+            with socket.create_connection((args.host, args.port), timeout=5) as s, \
+                    s.makefile("rwb", buffering=0) as f:
+                f.readline()  # greeting
+                for _ in range(args.per_connection):
+                    n += 1
+                    password = args.password if args.last_correct and n == total else f"guess{n}"
+                    f.write(b"USER admin\r\n")
+                    f.readline()
+                    f.write(f"PASS {password}\r\n".encode())
+                    f.readline()
+                f.write(b"QUIT\r\n")
+                f.readline()
+        except OSError as exc:
+            print(f"guess-logins: {exc!r}")
+        time.sleep(args.gap)
+    print(f"guess-logins: {n} guesses")
+
+
 def connect(args):
     for _ in range(args.count):
         try:
@@ -321,6 +369,22 @@ def main():
         sp.add_argument("bind")
         sp.add_argument("port", type=int)
         sp.set_defaults(func=func)
+
+    sp = sub.add_parser("login-server")
+    sp.add_argument("bind")
+    sp.add_argument("port", type=int)
+    sp.add_argument("--password", default="letmein")
+    sp.set_defaults(func=login_server)
+
+    sp = sub.add_parser("guess-logins")
+    sp.add_argument("host")
+    sp.add_argument("port", type=int)
+    sp.add_argument("--connections", type=int, default=5)
+    sp.add_argument("--per-connection", type=int, default=3)
+    sp.add_argument("--password", default="letmein")
+    sp.add_argument("--last-correct", action="store_true")
+    sp.add_argument("--gap", type=float, default=0.1)
+    sp.set_defaults(func=guess_logins)
 
     sp = sub.add_parser("tls-server")
     sp.add_argument("bind")

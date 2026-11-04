@@ -9,4 +9,5 @@ venv/
 # Captures and derived data: recreate with data/scripts/
 data/raw/
 data/synthetic/
+data/synthetic_runs/
 data/processed/

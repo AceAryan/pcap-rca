@@ -137,6 +137,40 @@ def test_no_server_hello(tmp_path):
     assert len(detect(tmp_path, hello + tail)) == 1
 
 
+# --- logins -----------------------------------------------------------------------
+
+def ftp_session(cport, t0, passwords_ok, port=21):
+    frames = handshake(port, cport, t0) + [s2c(t0 + 0.01, 1, b"220 FTP ready\r\n", port=port, cport=cport)]
+    seq_c, seq_s = 1, 16
+    for i, ok in enumerate(passwords_ok):
+        t = t0 + 0.02 + i * 0.01
+        frames.append(c2s(t, seq_c, b"PASS guess\r\n", port=port, cport=cport))
+        reply = b"230 Login successful\r\n" if ok else b"530 Login incorrect\r\n"
+        frames.append(s2c(t + 0.005, seq_s, reply, port=port, cport=cport))
+        seq_c, seq_s = seq_c + 12, seq_s + len(reply)
+    return frames
+
+
+def test_failed_logins(tmp_path):
+    events = detect(tmp_path, ftp_session(40000, 0.0, [False, False, True]))
+    assert types(events) == {("AUTH_FAILURE", "ftp"): 2}
+    # "530" at the start of a segment of a non-FTP/SMTP session is not a login reply
+    frames = handshake() + [s2c(0.01, 1, b"530 is a number in this HTTP body")]
+    assert detect(tmp_path, frames) == []
+
+
+def test_brute_force_rule(tmp_path):
+    frames = []
+    for i in range(4):
+        frames += ftp_session(41000 + i, i * 1.0, [False, False, False] if i < 3 else [False, True])
+    capture = Capture.from_file(write_pcap(tmp_path / "t.pcap", frames))
+    (d,) = infer(capture, run_detectors(capture))
+    assert (d.rule, d.target, d.confidence) == ("BRUTE_FORCE", "10.0.0.2:21", "high")
+    assert "10 times over 4 connections" in d.evidence[0]
+    assert "1 login" in d.evidence[1] and "SUCCEEDED" in d.evidence[1]
+    assert d.next_steps[0].startswith("Treat the targeted account(s) as compromised")
+
+
 # --- rules ----------------------------------------------------------------------
 
 def test_tls_failure_rule_gives_specific_next_steps(tmp_path):

@@ -26,10 +26,10 @@ from dataclasses import dataclass, field
 from statistics import median
 
 from ..parser import ACK, FIN, RST, SYN, Packet
-from ..streams import C2S, S2C, Flow
+from ..streams import C2S, S2C, Flow, side_name
 from ..aggregation.spatial import prefix
 from .base import (ERROR, INFO, WARNING, Capture, Config, Event, direction_name, flow_event,
-                   side_name, sort_events)
+                   sort_events)
 
 MOD = 2**32
 HALF = 2**31

@@ -1,4 +1,5 @@
-"""Application-layer events (docs/event_types.md §5): HTTP/1.x and TLS handshakes.
+"""Application-layer events (docs/event_types.md §5): HTTP/1.x, TLS handshakes,
+and failed logins on clear-text FTP/SMTP.
 
 Both are recognised by content, on any port, from the first bytes of each
 TCP segment (Packet.payload_head): an HTTP request line or status line, or a
@@ -16,8 +17,8 @@ from __future__ import annotations
 from collections import deque
 
 from ..parser import FIN, RST
-from ..streams import C2S, Flow
-from .base import ERROR, INFO, WARNING, Capture, Config, Event, flow_event, side_name, sort_events
+from ..streams import C2S, Flow, side_name
+from .base import ERROR, INFO, WARNING, Capture, Config, Event, flow_event, sort_events
 
 HTTP_METHODS = (b"GET ", b"POST ", b"PUT ", b"HEAD ", b"DELETE ", b"OPTIONS ", b"PATCH ",
                 b"CONNECT ", b"TRACE ")
@@ -80,6 +81,27 @@ def _http_events(flow: Flow, cfg: Config) -> list[Event]:
             if "latency_ms" in metrics and metrics["latency_ms"] > cfg.http_slow_ms:
                 events.append(flow_event(flow, "HTTP_SLOW_RESPONSE", WARNING, start, p.ts,
                                          evidence=evidence, metrics=dict(metrics)))
+    return events
+
+
+# Clear-text login protocols that greet with "220" and reject a login with a
+# fixed reply code: FTP "530 Login incorrect", SMTP "535 Authentication failed".
+_AUTH_FAILURE_REPLIES = {b"530": "ftp", b"535": "smtp"}
+
+
+def _auth_events(flow: Flow) -> list[Event]:
+    server = [p for p, d in zip(flow.packets, flow.directions) if d != C2S and p.payload_head]
+    if not server or not server[0].payload_head.startswith(b"220"):
+        return []  # not an FTP/SMTP session
+    events, seen = [], set()
+    for p in server[1:]:
+        code = p.payload_head[:3]
+        if code in _AUTH_FAILURE_REPLIES and p.payload_head[3:4] in (b" ", b"-") \
+                and p.tcp_seq not in seen:
+            seen.add(p.tcp_seq)  # a retransmitted reply counts once
+            events.append(flow_event(flow, "AUTH_FAILURE", WARNING, p.ts,
+                                     subtype=_AUTH_FAILURE_REPLIES[code], evidence=[p.frame],
+                                     metrics={"reply": code.decode()}))
     return events
 
 
@@ -149,4 +171,5 @@ def detect_app_events(capture: Capture, config: Config | None = None) -> list[Ev
             continue
         events.extend(_http_events(flow, cfg))
         events.extend(_tls_events(flow, cfg, end))
+        events.extend(_auth_events(flow))
     return sort_events(events)

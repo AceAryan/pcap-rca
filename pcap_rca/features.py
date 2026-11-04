@@ -5,17 +5,21 @@ Packet rows: one per IP packet, with the fields from the problem statement
 timing) plus flow context (flow id, direction, relative sequence numbers).
 
 Flow rows: one per flow, with volume, size, timing and flag statistics and
-the TCP handshake/teardown summary from streams.TcpState.
+the TCP handshake/teardown summary from streams.TcpState. Given the
+detectors' events, flow rows also carry per-flow event counts (EVENT_FIELDS):
+retransmissions, resets, DNS failures... the signals that separate faults,
+so a model doesn't have to re-learn them from raw packet counts.
 """
 from __future__ import annotations
 
 import csv
+from collections import defaultdict
 from pathlib import Path
 from statistics import fmean, pstdev
 from typing import Iterable, Iterator
 
 from .parser import ACK, CWR, ECE, FIN, PROTO_NAMES, PSH, RST, SYN, URG, Packet, flag_str
-from .streams import C2S, S2C, Flow, FlowTable
+from .streams import C2S, S2C, Flow, FlowTable, side_name
 
 PACKET_FIELDS = [
     "frame", "ts", "rel_time", "flow_id", "direction",
@@ -35,8 +39,45 @@ FLOW_FIELDS = [
     "syn", "fin", "rst", "psh", "ack", "urg", "ece", "cwr",
     "tcp_syn_count", "tcp_synack_count", "tcp_established", "tcp_irtt",
     "tcp_mss_client", "tcp_mss_server", "tcp_wscale_client", "tcp_wscale_server",
-    "tcp_close", "tcp_rst_by", "icmp_errors",
+    "tcp_close", "tcp_rst_by", "icmp_errors", "dns_rcode", "dns_latency_ms",
 ]
+
+_UNREACHABLE = {"ICMP_NET_UNREACHABLE", "ICMP_HOST_UNREACHABLE", "ICMP_PORT_UNREACHABLE",
+                "ICMP_ADMIN_PROHIBITED", "ICMP_UNREACHABLE_OTHER"}
+
+# Per-flow event features: name -> which events count towards it.
+_EVENT_COUNTS = {
+    "ev_retrans": lambda e: e.event_type == "TCP_RETRANSMISSION" and e.subtype != "spurious",
+    "ev_retrans_spurious": lambda e: e.event_type == "TCP_RETRANSMISSION" and e.subtype == "spurious",
+    "ev_dup_ack_runs": lambda e: e.event_type == "TCP_DUP_ACK",
+    "ev_out_of_order": lambda e: e.event_type == "TCP_OUT_OF_ORDER" and e.subtype != "capture_skew",
+    "ev_lost_segment": lambda e: e.event_type == "TCP_LOST_SEGMENT" and e.subtype != "capture_loss",
+    "ev_capture_loss": lambda e: e.event_type == "TCP_LOST_SEGMENT" and e.subtype == "capture_loss",
+    "ev_zero_window": lambda e: e.event_type == "TCP_ZERO_WINDOW",
+    "ev_rst_abort": lambda e: e.event_type == "TCP_RST_MIDSTREAM" and e.subtype is None,
+    "ev_rst_close": lambda e: e.event_type == "TCP_RST_MIDSTREAM" and e.subtype is not None,
+    "ev_syn_timeout": lambda e: e.event_type == "TCP_SYN_TIMEOUT",
+    "ev_conn_refused": lambda e: e.event_type == "TCP_CONN_REFUSED",
+    "ev_incomplete_handshake": lambda e: e.event_type == "TCP_INCOMPLETE_HANDSHAKE",
+    "ev_high_rtt": lambda e: e.event_type == "TCP_HIGH_RTT",
+    "ev_icmp_unreachable": lambda e: e.event_type in _UNREACHABLE,
+    "ev_icmp_frag_needed": lambda e: e.event_type == "ICMP_FRAG_NEEDED",
+    "ev_icmp_ttl_exceeded": lambda e: e.event_type == "ICMP_TTL_EXCEEDED",
+    "ev_dns_nxdomain": lambda e: e.event_type == "DNS_NXDOMAIN",
+    "ev_dns_servfail": lambda e: e.event_type == "DNS_SERVFAIL",
+    "ev_dns_refused": lambda e: e.event_type == "DNS_REFUSED",
+    "ev_dns_timeout": lambda e: e.event_type == "DNS_TIMEOUT",
+    "ev_dns_retrans": lambda e: e.event_type == "DNS_RETRANSMISSION",
+    "ev_dns_slow": lambda e: e.event_type == "DNS_SLOW_RESPONSE",
+    "ev_dns_nodata": lambda e: e.event_type == "DNS_NODATA",
+    "ev_dns_tcp_fallback": lambda e: e.event_type == "DNS_TCP_FALLBACK",
+    "ev_http_4xx": lambda e: e.event_type == "HTTP_ERROR_RESPONSE" and e.subtype == "client",
+    "ev_http_5xx": lambda e: e.event_type == "HTTP_ERROR_RESPONSE" and e.subtype == "server",
+    "ev_http_slow": lambda e: e.event_type == "HTTP_SLOW_RESPONSE",
+    "ev_tls_failure": lambda e: e.event_type == "TLS_HANDSHAKE_FAILURE",
+    "ev_auth_failure": lambda e: e.event_type == "AUTH_FAILURE",
+}
+EVENT_FIELDS = list(_EVENT_COUNTS) + ["ev_capture_skew_segments", "zero_window_s", "retrans_rate"]
 
 _FLAG_FIELDS = (("syn", SYN), ("fin", FIN), ("rst", RST), ("psh", PSH),
                 ("ack", ACK), ("urg", URG), ("ece", ECE), ("cwr", CWR))
@@ -114,6 +155,7 @@ def flow_features(flow: Flow) -> dict:
         "ttl_min_c2s": min((p.ttl for p in c2s), default=None),
         "ttl_min_s2c": min((p.ttl for p in s2c), default=None),
         "icmp_errors": len(flow.icmp_errors),
+        "dns_rcode": None, "dns_latency_ms": None,
     }
     (row["pkt_len_min"], row["pkt_len_mean"],
      row["pkt_len_max"], row["pkt_len_std"]) = _stats(sizes)
@@ -129,14 +171,42 @@ def flow_features(flow: Flow) -> dict:
             "tcp_mss_client": t.mss[C2S], "tcp_mss_server": t.mss[S2C],
             "tcp_wscale_client": t.wscale[C2S], "tcp_wscale_server": t.wscale[S2C],
             "tcp_close": t.close_reason or "open",
-            "tcp_rst_by": None if t.rst_dir is None else ("client" if t.rst_dir == C2S else "server"),
+            "tcp_rst_by": None if t.rst_dir is None else side_name(t.rst_dir),
         })
+
+    queries = [p for p in pkts if p.dns is not None and not p.dns.is_response]
+    answer = next((p for p in pkts if p.dns is not None and p.dns.is_response), None)
+    if answer is not None:
+        row["dns_rcode"] = answer.dns.rcode
+        if queries and answer.ts >= queries[0].ts:
+            row["dns_latency_ms"] = (answer.ts - queries[0].ts) * 1000
     return row
 
 
-def flow_rows(table: FlowTable) -> Iterator[dict]:
+def event_features(flow: Flow, events: list) -> dict:
+    """EVENT_FIELDS for one flow, from the detector events located on it."""
+    row = {name: sum(1 for e in events if match(e)) for name, match in _EVENT_COUNTS.items()}
+    row["ev_capture_skew_segments"] = sum(
+        e.count for e in events if e.event_type == "TCP_OUT_OF_ORDER" and e.subtype == "capture_skew")
+    row["zero_window_s"] = sum(e.metrics.get("duration", 0.0) for e in events
+                               if e.event_type == "TCP_ZERO_WINDOW")
+    data_segments = sum(1 for p in flow.packets if p.payload_len)
+    row["retrans_rate"] = row["ev_retrans"] / data_segments if data_segments else 0.0
+    return row
+
+
+def flow_rows(table: FlowTable, events: list | None = None) -> Iterator[dict]:
+    """One row per flow. With `events` (from detectors.run_detectors) the rows
+    also carry EVENT_FIELDS."""
+    by_flow: dict[int, list] = defaultdict(list)
+    for e in events or ():
+        if e.stream_id is not None:
+            by_flow[e.stream_id].append(e)
     for flow in table.flows:
-        yield flow_features(flow)
+        row = flow_features(flow)
+        if events is not None:
+            row.update(event_features(flow, by_flow.get(flow.id, [])))
+        yield row
 
 
 def write_csv(rows: Iterable[dict], path: str | Path, fields: list[str]) -> int:

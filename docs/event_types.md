@@ -277,9 +277,10 @@ Cross-check filters: `icmp.type == 3 && icmp.code == 4`, `icmp.type == 11`, `icm
 
 ## 5. Application events (`detectors/app_events.py`)
 
-HTTP/1.x and TLS are recognised **by content, on any port**, from the first
-32 bytes of each TCP segment (`Packet.payload_head`): an HTTP request or
-status line, or a TLS record header. Retransmitted segments count once.
+HTTP/1.x, TLS and clear-text FTP/SMTP logins are recognised **by content,
+on any port**, from the first 32 bytes of each TCP segment
+(`Packet.payload_head`): an HTTP request or status line, a TLS record
+header, or an FTP/SMTP reply code. Retransmitted segments count once.
 
 Only clear text is visible. HTTP/2 and anything inside TLS are encrypted.
 TLS 1.3 also encrypts everything after ServerHello, including most alerts,
@@ -293,8 +294,11 @@ send handshake alerts in clear text.
 | `HTTP_SLOW_RESPONSE` | First response byte more than `http_slow_ms` after the **end** of the request (its last client data segment), so a slow upload isn't blamed on the server. `request_ms` records how long sending the request took | warning |
 | `TLS_HANDSHAKE_FAILURE` | subtype `alert`: a clear-text fatal alert (record type 21, length 2, level 2) before any application data. Metrics: `alert` name, `alert_code`, `sent_by`, `server_hello`. subtype `no_server_hello`: a ClientHello never answered by a ServerHello before the connection closed, or for `tls_handshake_timeout` until the capture ends. Metrics: `closed_by`, `waited`, `reset` | error |
 
+| `AUTH_FAILURE` | A rejected login on a session whose server greeted with `220` (FTP and SMTP both do): FTP reply `530` (subtype `ftp`) or SMTP reply `535` (subtype `smtp`). One event per rejected attempt. The greeting check stops a "530" at the start of, say, an HTTP body segment from counting. SSH, POP3 and IMAP logins aren't covered (SSH is encrypted) | warning |
+
 Cross-check filters: `http.response.code >= 400`, `tls.alert_message.level == 2`,
-`tls.handshake.type == 1` without a following `tls.handshake.type == 2`.
+`tls.handshake.type == 1` without a following `tls.handshake.type == 2`,
+`ftp.response.code == 530`, `smtp.response.code == 535`.
 
 ---
 
@@ -362,29 +366,30 @@ in its evidence.
 | # | Rule | Fires when | Confidence | Diagnosis |
 |---|---|---|---|---|
 | 1 | `SCAN_OR_FLOOD` | **Connection flood:** one client opens ≥ `flood_min_connections` TCP connections to one service and that service shows symptoms (unanswered SYNs, resets, retransmissions, slow responses...); claims all of them. **Scan:** one source has failed handshakes (`TCP_SYN_TIMEOUT` / `TCP_CONN_REFUSED` / `TCP_INCOMPLETE_HANDSHAKE`) to ≥ `scan_min_targets` host:port targets. **SYN flood:** ≥ `flood_min_sources` sources leave half-open handshakes on one service. Claims those events | high (scan: at ≥ 50 targets) | Connection flood (DoS), vertical scan (one host), horizontal scan (one port), or many hosts on many ports (a scan, or a peer-to-peer application trying peers). Not a fault |
-| 2 | `CAPTURE_LOSS` | ≥ `capture_loss_min` `TCP_LOST_SEGMENT` of subtype `capture_loss`, or ≥ `capture_skew_min` segments of `capture_skew` | high on ≥ 2 flows | The capture is unreliable: it dropped packets, or timestamps the two directions inconsistently. Every other diagnosis is lowered one confidence level |
-| 3 | `RESOLVER_UNREACHABLE` | `DNS_TIMEOUT` whose queries drew ICMP unreachables. Claims those ICMP events | high | Resolver host down or no path to it |
-| 4 | `RESOLVER_REFUSED` | `DNS_REFUSED` from a resolver | high | Client not allowed to use this resolver |
-| 5 | `RESOLVER_FAILURE` | `DNS_SERVFAIL`, or `DNS_TIMEOUT` that no ICMP explains | high if ≥ 2 failures and the resolver sent anything; medium for a single failure or a completely silent resolver (could also be unreachable without ICMP) | Resolver broken or failing upstream |
-| 6 | `DNS_TCP_BLOCKED` | `DNS_TCP_FALLBACK` with `tcp_attempted` and not `tcp_ok`. Claims the failed TCP/53 handshakes | high | TCP/53 blocked; large answers fail |
-| 7 | `NAME_NOT_FOUND` | `DNS_NXDOMAIN`, per client, ignoring lookups that fail routinely on healthy networks: reverse lookups (`*.in-addr.arpa`, `*.ip6.arpa`), DNS-SD service discovery, resolver self-tests (`dnsbugtest`) | high if a name repeats or the lookups are `PERIODIC` | Misconfigured hostname or missing record; ≥ 20 distinct names → consider DGA malware |
-| 8 | `ADMIN_BLOCK` | `ICMP_ADMIN_PROHIBITED`, per reporting device | high | Explicit reject by that device |
-| 9 | `NO_ROUTE` | `ICMP_NET_UNREACHABLE`, per reporting router | high | Missing route on that router |
-| 10 | `ROUTING_LOOP` | `ICMP_TTL_EXCEEDED` subtype `loop`, per destination /24 | high if ≥ 2 packets | Packets circle until TTL expires |
-| 11 | `HOST_UNREACHABLE` | `ICMP_HOST_UNREACHABLE` (high), or `TCP_SYN_TIMEOUT` on ≥ 2 ports of a host that sent nothing at all (medium) | see left | Host down, wrong VLAN, ARP/ND failure |
-| 12 | `SERVICE_DOWN` | `TCP_CONN_REFUSED` or `ICMP_PORT_UNREACHABLE` (not traceroute, and not for traffic *from* a port below 1024 *to* an ephemeral port: that's a late reply, typically DNS, to a client that already closed its socket), per service | high if the host accepts connections on another port, else medium (the reject could come from a firewall) | Service not running / not listening |
-| 13 | `FIREWALL_DROP` | `TCP_SYN_TIMEOUT`, per service | high if the host accepts other ports or other clients reach this service; low if the host showed no sign of life | Silently filtered |
-| 14 | `MTU_MISMATCH` | `ICMP_FRAG_NEEDED`, per reporter. Claims the retransmissions on those flows (the oversized segments resent smaller) | high if the sender then used packets that fit | Smaller-MTU link handled by PMTU discovery |
-| 15 | `PMTU_BLACKHOLE` | On an established flow without `ICMP_FRAG_NEEDED`: ≥ 2 `rto` retransmissions of full-size segments (≥ `pmtu_min_segment` and ≥ 90 % of the largest sent) that the peer never ACKs past | high | Large packets vanish and the ICMP is filtered |
-| 16 | `RECEIVER_BOTTLENECK` | `TCP_ZERO_WINDOW` from one host totalling ≥ `zero_window_min_s`, or probed by the sender. Claims retransmissions on those flows | high if ≥ 1 s or ≥ 3 episodes | Receiving application can't keep up |
-| 17 | `PACKET_REORDERING` | ≥ `reorder_min_events` `TCP_OUT_OF_ORDER` to one /24, at least as many as the non-spurious retransmissions on those flows. Claims the spurious retransmissions and dup-ACK runs | high if ≥ 5 % of data segments | Per-packet load balancing / multipath |
-| 18 | `PATH_LOSS` | ≥ `loss_min_retrans` non-spurious retransmissions at a rate > `loss_rate_threshold` of the data segments in those directions, with dup-ACK runs or lost segments, and fewer out-of-order events (excluding `capture_skew`) than retransmissions | high if ≥ 2 servers or ≥ 5 % loss; otherwise medium (one server: loss at that server isn't ruled out) | Loss on the path |
-| 19 | `HIGH_LATENCY_PATH` | `TCP_HIGH_RTT` on ≥ `high_latency_min_flows` flows to one /24 | high on ≥ 3 flows | Long or congested path |
-| 20 | `SLOW_RESOLVER` | ≥ `slow_resolver_min` `DNS_SLOW_RESPONSE` from one resolver, unless `HIGH_LATENCY_PATH` already explains its network | high on ≥ 5 | Resolver overloaded or slow upstream |
-| 21 | `TLS_FAILURE` | `TLS_HANDSHAKE_FAILURE`, per service. Claims the client RSTs that typically follow a rejected handshake. Next steps depend on the cause: certificate alerts → chain/expiry/name/trust store; negotiation alerts → versions/ciphers/SNI/ALPN; no ServerHello → is TLS really served there, or is a middlebox dropping it | high on ≥ 2 failures | TLS handshakes fail |
-| 22 | `IDLE_TIMEOUT` | ≥ `idle_timeout_min_events` `TCP_RST_MIDSTREAM` to one service, each after ≥ 1 s idle, with idle times clustered (CV < `periodic_max_cv`) | high | A middlebox drops idle connections |
-| 23 | `ABRUPT_TERMINATION` | Server-sent `TCP_RST_MIDSTREAM` of severity warning (data in flight), ≥ 2 per service or a `BURST` | high across ≥ 2 clients or in a burst | Application crash/abort or proxy rejecting |
-| 24 | `APP_ERRORS` | ≥ 2 `HTTP_ERROR_RESPONSE` 5xx per service | medium | Server-side application failure |
+| 2 | `BRUTE_FORCE` | ≥ `brute_force_min_failures` `AUTH_FAILURE` from one client to one service. Counts *successful* logins (FTP `230`, SMTP `235`) on the same connections, and claims the client's other symptoms on that service (refusals, resets) | high | Password guessing. If a login succeeded: treat the account as compromised. Clear-text logins also exposed the passwords on the wire |
+| 3 | `CAPTURE_LOSS` | ≥ `capture_loss_min` `TCP_LOST_SEGMENT` of subtype `capture_loss`, or ≥ `capture_skew_min` segments of `capture_skew` | high on ≥ 2 flows | The capture is unreliable: it dropped packets, or timestamps the two directions inconsistently. Every other diagnosis is lowered one confidence level |
+| 4 | `RESOLVER_UNREACHABLE` | `DNS_TIMEOUT` whose queries drew ICMP unreachables. Claims those ICMP events | high | Resolver host down or no path to it |
+| 5 | `RESOLVER_REFUSED` | `DNS_REFUSED` from a resolver | high | Client not allowed to use this resolver |
+| 6 | `RESOLVER_FAILURE` | `DNS_SERVFAIL`, or `DNS_TIMEOUT` that no ICMP explains | high if ≥ 2 failures and the resolver sent anything; medium for a single failure or a completely silent resolver (could also be unreachable without ICMP) | Resolver broken or failing upstream |
+| 7 | `DNS_TCP_BLOCKED` | `DNS_TCP_FALLBACK` with `tcp_attempted` and not `tcp_ok`. Claims the failed TCP/53 handshakes | high | TCP/53 blocked; large answers fail |
+| 8 | `NAME_NOT_FOUND` | `DNS_NXDOMAIN`, per client, ignoring lookups that fail routinely on healthy networks: reverse lookups (`*.in-addr.arpa`, `*.ip6.arpa`), DNS-SD service discovery, resolver self-tests (`dnsbugtest`) | high if a name repeats or the lookups are `PERIODIC` | Misconfigured hostname or missing record; ≥ 20 distinct names → consider DGA malware |
+| 9 | `ADMIN_BLOCK` | `ICMP_ADMIN_PROHIBITED`, per reporting device | high | Explicit reject by that device |
+| 10 | `NO_ROUTE` | `ICMP_NET_UNREACHABLE`, per reporting router | high | Missing route on that router |
+| 11 | `ROUTING_LOOP` | `ICMP_TTL_EXCEEDED` subtype `loop`, per destination /24 | high if ≥ 2 packets | Packets circle until TTL expires |
+| 12 | `HOST_UNREACHABLE` | `ICMP_HOST_UNREACHABLE` (high), or `TCP_SYN_TIMEOUT` on ≥ 2 ports of a host that sent nothing at all (medium) | see left | Host down, wrong VLAN, ARP/ND failure |
+| 13 | `SERVICE_DOWN` | `TCP_CONN_REFUSED` or `ICMP_PORT_UNREACHABLE` (not traceroute, and not for traffic *from* a port below 1024 *to* an ephemeral port: that's a late reply, typically DNS, to a client that already closed its socket), per service | high if the host accepts connections on another port, else medium (the reject could come from a firewall) | Service not running / not listening |
+| 14 | `FIREWALL_DROP` | `TCP_SYN_TIMEOUT`, per service | high if the host accepts other ports or other clients reach this service; low if the host showed no sign of life | Silently filtered |
+| 15 | `MTU_MISMATCH` | `ICMP_FRAG_NEEDED`, per reporter. Claims the retransmissions on those flows (the oversized segments resent smaller) | high if the sender then used packets that fit | Smaller-MTU link handled by PMTU discovery |
+| 16 | `PMTU_BLACKHOLE` | On an established flow without `ICMP_FRAG_NEEDED`: ≥ 2 `rto` retransmissions of full-size segments (≥ `pmtu_min_segment` and ≥ 90 % of the largest sent) that the peer never ACKs past | high | Large packets vanish and the ICMP is filtered |
+| 17 | `RECEIVER_BOTTLENECK` | `TCP_ZERO_WINDOW` from one host totalling ≥ `zero_window_min_s`, or probed by the sender. Claims retransmissions on those flows | high if ≥ 1 s or ≥ 3 episodes | Receiving application can't keep up |
+| 18 | `PACKET_REORDERING` | ≥ `reorder_min_events` `TCP_OUT_OF_ORDER` to one /24, at least as many as the non-spurious retransmissions on those flows. Claims the spurious retransmissions and dup-ACK runs | high if ≥ 5 % of data segments | Per-packet load balancing / multipath |
+| 19 | `PATH_LOSS` | ≥ `loss_min_retrans` non-spurious retransmissions at a rate > `loss_rate_threshold` of the data segments in those directions, with dup-ACK runs or lost segments, and fewer out-of-order events (excluding `capture_skew`) than retransmissions | high if ≥ 2 servers or ≥ 5 % loss; otherwise medium (one server: loss at that server isn't ruled out) | Loss on the path |
+| 20 | `HIGH_LATENCY_PATH` | `TCP_HIGH_RTT` on ≥ `high_latency_min_flows` flows to one /24 | high on ≥ 3 flows, medium on 2, low on 1 (a single slow handshake is real but thin evidence) | Long or congested path |
+| 21 | `SLOW_RESOLVER` | ≥ `slow_resolver_min` `DNS_SLOW_RESPONSE` from one resolver, unless `HIGH_LATENCY_PATH` already explains its network | high on ≥ 5 | Resolver overloaded or slow upstream |
+| 22 | `TLS_FAILURE` | `TLS_HANDSHAKE_FAILURE`, per service. Claims the client RSTs that typically follow a rejected handshake. Next steps depend on the cause: certificate alerts → chain/expiry/name/trust store; negotiation alerts → versions/ciphers/SNI/ALPN; no ServerHello → is TLS really served there, or is a middlebox dropping it | high on ≥ 2 failures | TLS handshakes fail |
+| 23 | `IDLE_TIMEOUT` | ≥ `idle_timeout_min_events` `TCP_RST_MIDSTREAM` to one service, each after ≥ 1 s idle, with idle times clustered (CV < `periodic_max_cv`) | high | A middlebox drops idle connections |
+| 24 | `ABRUPT_TERMINATION` | Server-sent `TCP_RST_MIDSTREAM` of severity warning (data in flight), ≥ 2 per service or a `BURST` | high across ≥ 2 clients or in a burst | Application crash/abort or proxy rejecting |
+| 25 | `APP_ERRORS` | ≥ 2 `HTTP_ERROR_RESPONSE` 5xx per service | medium | Server-side application failure |
 
 Each diagnosis carries the next steps from `NEXT_STEPS` in `inference/rules.py`
 (for example `PMTU_BLACKHOLE`: find the path MTU with `ping -M do -s <size>`,
@@ -417,12 +422,13 @@ allow ICMP 3/4 and ICMPv6 type 2, clamp the MSS).
 | `reorder_min_events` | 10 | `PACKET_REORDERING` |
 | `zero_window_min_s` | 0.2 s | `RECEIVER_BOTTLENECK` (a few ms of full buffer under load is normal) |
 | `pmtu_min_segment` | 1000 bytes | `PMTU_BLACKHOLE` |
-| `high_latency_min_flows` | 2 | `HIGH_LATENCY_PATH` |
+| `high_latency_min_flows` | 1 | `HIGH_LATENCY_PATH`. Was 2; the randomised runs showed that at 700 ms the first handshake is often resent (Karn's rule then takes no sample), leaving one measurable flow |
 | `slow_resolver_min` | 2 | `SLOW_RESOLVER` |
 | `capture_loss_min` / `capture_skew_min` | 3 / 20 | `CAPTURE_LOSS` |
 | `scan_min_targets` / `flood_min_sources` | 20 / 20 | `SCAN_OR_FLOOD` |
 | `flood_min_connections` | 500 | `SCAN_OR_FLOOD` (connection flood). On CIC-IDS2017 the busiest normal client→service pair had 94 connections; the floods had 1,987 to 45,626 |
 | `idle_timeout_min_events` | 3 | `IDLE_TIMEOUT` |
+| `brute_force_min_failures` | 5 | `BRUTE_FORCE` (failed logins from one client to one service). A person mistyping a password fails 2–3 times. Was 10, which missed 4 of 50 randomised brute-force runs that made only 7–9 guesses |
 
 All thresholds live in `detectors/base.py` (`Config`).
 
@@ -462,6 +468,7 @@ are in each scenario's `.json`). Public samples are described in
 | `ICMP_TTL_EXCEEDED` | `icmp_routing_loop` (`loop`), `icmp_traceroute` (`traceroute`) | `SkypeIRC.cap` (17) |
 | `HTTP_ERROR_RESPONSE` | `http_errors` (404 `client`, 500 + 503 `server`) | |
 | `HTTP_SLOW_RESPONSE` | | `tcp-ethereal-file1.trace` is the counter-example: a 6.6 s POST upload answered 243 ms after it finished is *not* slow |
+| `AUTH_FAILURE` | `auth_bruteforce` | CIC-IDS2017 Tuesday FTP-Patator: 385 in 2 minutes (09:26–09:28) |
 | `TLS_HANDSHAKE_FAILURE` | `tls_bad_cert` (`alert`: `unknown_ca` from the client), `tls_no_server_hello` | |
 | *No TCP fault events expected* | `baseline` | `tcp-ethereal-file1.trace`; `tcp-ecn-sample.pcap` (only a `TCP_HIGH_RTT` of 452 ms) |
 

@@ -17,7 +17,7 @@ eye, using explicit, auditable detection rules instead of a black-box model.
 - TCP event detection: retransmissions, zero window, SYN timeout, RST, out-of-order
 - DNS event detection: NXDOMAIN, timeout, retransmit, TCP fallback
 - ICMP event detection: destination unreachable, TTL exceeded, PMTU issues
-- Application events: HTTP error / slow responses, TLS handshake failures
+- Application events: HTTP error / slow responses, TLS handshake failures, failed FTP/SMTP logins
 - Spatial-temporal aggregation (burst / periodic / escalating patterns)
 - Rule-based root-cause correlation with confidence, evidence and next steps
 - CLI tool for quick PCAP analysis
@@ -36,6 +36,10 @@ python -m pcap_rca.cli features path/to/capture.pcap --flows flows.csv --packets
 # --json writes diagnoses + event groups + events, --csv the events
 python -m pcap_rca.cli analyze path/to/capture.pcap --json report.json --csv events.csv
 python -m pcap_rca.cli analyze capture.pcap --only tcp,dns --min-severity warning
+
+# Labelled per-flow dataset for ML (features + event counts + label + train/test)
+python -m pcap_rca.cli dataset data/processed/dataset.csv \
+    --synthetic data/synthetic_runs --cic data/processed/cic/*.pcapng
 ```
 
 Event IDs, detection rules and thresholds: [docs/event_types.md](docs/event_types.md).
@@ -54,7 +58,9 @@ Early development.
 - [x] Spatial-temporal aggregation (scope + burst/periodic/escalating patterns)
 - [x] Root-cause rules with confidence, evidence and next steps
 - All 27 synthetic fault scenarios: expected events and exactly the expected root cause
-- [ ] Validation on CIC-IDS2017 (needs the dataset; see data/README.md)
+- [x] Checked on CIC-IDS2017 slices: port scan, DDoS, DoS (Hulk, slowloris) and
+      FTP brute force identified; results in data/README.md
+- [x] Labelled per-flow dataset builder for ML (synthetic faults + CIC attacks)
 - [ ] ML/DL phase
 
 ## License

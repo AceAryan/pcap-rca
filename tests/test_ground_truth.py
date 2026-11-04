@@ -13,7 +13,7 @@ from builders import DATA_DIR
 from pcap_rca.detectors import Capture, run_detectors
 from pcap_rca.inference import infer
 
-CHECKED_PREFIXES = ("TCP_", "DNS_", "ICMP_", "HTTP_", "TLS_")
+CHECKED_PREFIXES = ("TCP_", "DNS_", "ICMP_", "HTTP_", "TLS_", "AUTH_")
 LABELS = sorted((DATA_DIR / "synthetic").glob("*.json"))
 
 

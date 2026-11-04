@@ -63,7 +63,7 @@ class Config:
     reorder_min_events: int = 10
     zero_window_min_s: float = 0.2
     pmtu_min_segment: int = 1000
-    high_latency_min_flows: int = 2
+    high_latency_min_flows: int = 1  # one slow handshake: a diagnosis at low confidence
     slow_resolver_min: int = 2
     capture_loss_min: int = 3
     capture_skew_min: int = 20  # data segments recorded after their own ACK
@@ -71,6 +71,9 @@ class Config:
     flood_min_sources: int = 20
     flood_min_connections: int = 500  # from one client to one service
     idle_timeout_min_events: int = 3
+    # Failed logins from one client to one service. A person mistyping a
+    # password fails 2-3 times; 5+ is guessing. (Was 10: missed bursts of 7-9.)
+    brute_force_min_failures: int = 5
 
 
 @dataclass
@@ -112,11 +115,6 @@ def direction_name(direction: int) -> str:
 def direction_index(name: str) -> int:
     """Inverse of direction_name: 'c2s' -> C2S, 's2c' -> S2C."""
     return C2S if name == "c2s" else S2C
-
-
-def side_name(direction: int) -> str:
-    """Which endpoint sent a packet travelling in `direction`."""
-    return "client" if direction == C2S else "server"
 
 
 def sort_events(events: list[Event]) -> list[Event]:

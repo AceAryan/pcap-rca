@@ -11,8 +11,9 @@ data/
 │   └── capture_faults.sh        # + fault_helpers.py
 ├── raw/                         # downloads, untouched
 │   └── wireshark/
-├── synthetic/                   # fault-injection captures + ground-truth labels
-└── processed/                   # slices (cic/ = CIC-IDS2017 windows) and features
+├── synthetic/                   # canonical fault captures + ground-truth labels (tests)
+├── synthetic_runs/              # randomised fault captures (ML training data)
+└── processed/                   # slices (cic/ = CIC-IDS2017 windows), datasets
 ```
 
 The three sources serve different purposes:
@@ -69,6 +70,10 @@ writes:
   "root_cause": "RESOLVER_FAILURE",
   "expected": {"DNS_TIMEOUT": 2, "DNS_RETRANSMISSION": 4},
   "may_also": [],
+  "params": {"lookups": "2", "tries": "3"},
+  "flow_labels": [{"match": {"server_ip": "10.10.2.2", "server_port": 53},
+                   "label": "RESOLVER_FAILURE"}],
+  "default_label": "NORMAL",
   ...
 }
 ```
@@ -77,6 +82,8 @@ writes:
 `may_also` lists events that are legitimate side effects. Any other event
 reported for that capture is a false positive. `root_cause` is the rule from
 `docs/event_types.md` §7 that should fire (`null` means none should).
+`flow_labels` say which flows carry the injected fault (every other flow is
+`NORMAL`); `params` are the values the scenario used.
 
 ### Running it (Windows → WSL2)
 
@@ -87,10 +94,21 @@ needs a few packages first:
 wsl -u root
 apt update && apt install -y iptables tcpdump dnsutils openssl
 cd /mnt/d/AKASH.O/Documents/Study/CN/pcap-rca
-bash data/scripts/capture_faults.sh            # all 27 scenarios, ~3 min
+bash data/scripts/capture_faults.sh            # all 28 scenarios, ~4 min
 bash data/scripts/capture_faults.sh --list
 bash data/scripts/capture_faults.sh tcp_loss dns_timeout   # just some
+
+# Training data: N runs of every scenario with random parameters
+# (loss 1-8 %, delay 350-700 ms, MTU 1000-1400, 1-8 attempts, ...)
+bash data/scripts/capture_faults.sh --runs 12 --seed 2017   # -> data/synthetic_runs/, ~45 min
 ```
+
+`data/synthetic/` is the canonical set: fixed parameters, used by
+`tests/test_ground_truth.py`. `data/synthetic_runs/<scenario>__rNNN.*` is
+the randomised set for training; with `--seed` it is reproducible.
+
+Don't edit `capture_faults.sh` while it runs: bash reads a script
+incrementally, so a running copy can pick up half-edited lines.
 
 Nothing touches the host's real interfaces; the namespaces are deleted after
 each scenario.
@@ -101,11 +119,11 @@ each scenario.
 | TCP | `tcp_loss`, `tcp_reorder`, `tcp_high_latency`, `tcp_syn_timeout`, `tcp_conn_refused`, `tcp_rst_midstream`, `tcp_zero_window`, `tcp_pmtu_ok`, `tcp_pmtu_blackhole` |
 | ICMP | `icmp_port_unreachable`, `icmp_admin_prohibited`, `icmp_host_unreachable`, `icmp_net_unreachable`, `icmp_routing_loop`, `icmp_traceroute` |
 | DNS | `dns_nxdomain`, `dns_servfail`, `dns_refused`, `dns_timeout`, `dns_slow`, `dns_tcp_fallback`, `dns_nodata`, `dns_resolver_down` |
-| App | `http_errors`, `tls_bad_cert`, `tls_no_server_hello` |
+| App | `http_errors`, `tls_bad_cert`, `tls_no_server_hello`, `auth_bruteforce` |
 
 Scenarios with random loss or reordering (`tcp_loss`, `tcp_reorder`) produce
 different packet-level counts on every run, so their labels use `null`
-counts. Re-run them a few times to measure detector stability.
+counts.
 
 Things in the captures that aren't part of a fault:
 
@@ -117,9 +135,83 @@ Things in the captures that aren't part of a fault:
 
 The script pins itself to one CPU (`taskset -c 0`). Otherwise the veth
 links occasionally reorder bursts when the sender migrates between CPUs,
-and the baseline picks up out-of-order events nobody injected.
+and the baseline picks up out-of-order events nobody injected. For the
+same reason the netem queues are effectively unbounded (`NETEM_LIMIT`):
+netem's default 1,000-packet queue overflows under 30 ms of delay at veth
+speed, and one reorder run silently lost bursts of up to 156 segments.
 
-## 3. CIC-IDS2017
+## 3. Building the ML dataset
+
+```bash
+python -m pcap_rca.cli dataset data/processed/dataset.csv \
+    --synthetic data/synthetic_runs \
+    --cic data/processed/cic/*.pcapng \
+    [--max-per-label 5000]
+```
+
+One row per flow: flow statistics, plus per-flow counts of what the
+detectors found (`ev_retrans`, `ev_syn_timeout`, `ev_dns_nxdomain`, ...),
+plus:
+
+| Column | Meaning |
+|---|---|
+| `label` | `NORMAL`, the injected fault's root cause (synthetic), or the attack class (CIC-IDS2017) |
+| `label_source` | `synthetic` or `cic` |
+| `label_quality` | `exact` (synthetic: we injected the fault and know its flows), `schedule` (CIC attack: attacker, victim and time window match), `assumed` (CIC `NORMAL`: merely not part of a scheduled attack) |
+| `group` | the capture the flow came from |
+| `split` | `train` / `test`, assigned per capture (`--test-fraction`, default 0.2) |
+
+Two precautions are built in:
+
+- **Split by capture, never by row.** Flows of one capture share hosts and
+  timing; a random row split would put near-duplicates on both sides and
+  inflate the test score. CIC-IDS2017 is the exception that proves the
+  rule: each attack exists in only one capture, so a whole-capture split
+  would leave it entirely in train or entirely in test. CIC captures are
+  therefore split in **1-minute blocks** (`group` = `<capture>@<minute>`).
+- **Stratified.** About 20 % of each scenario's runs, and of each CIC
+  capture's blocks, go to test, and at least one whenever there are two or
+  more. A plain random pick left three classes (`ADMIN_BLOCK`,
+  `RESOLVER_UNREACHABLE`, `BRUTE_FORCE`) with no test examples at all. The
+  choice is by hash, so the same inputs always give the same split.
+- **Identifying columns are dropped** (addresses, ports, timestamps, flow
+  id). In the synthetic scenarios the fault is tied to a fixed port (9000 is
+  always the filtered one), so a model given ports would learn the lab
+  instead of the network behaviour. `--keep-identifiers` keeps them for
+  analysis.
+
+Other properties of the data, and what the builder does about them:
+
+- **Test-rig traffic is left out.** Every synthetic capture contains the
+  end-of-capture ICMP echo and IPv6 neighbour discovery from the virtual
+  interfaces. In the first build these were 1,952 of the 2,152 synthetic
+  `NORMAL` rows, and a model would have learned them as "what normal looks
+  like". They're excluded (`SYNTHETIC_EXCLUDE` in `pcap_rca/dataset.py`).
+- **CIC `NORMAL` is noisy.** 12 % of those flows carry fault events (DNS
+  failures, retransmissions...): they are only "not an attack", not
+  "healthy". Their `label_quality` is `assumed`; for fault classification,
+  consider training without them, or only on `exact` + `schedule`.
+- **Heavy imbalance.** The CIC floods contribute tens of thousands of
+  near-identical flows against tens to hundreds per fault class.
+  `--max-per-label N` keeps at most N rows per label in each split
+  (reproducible sample; classes are thinned, never dropped). Use class
+  weights and per-class metrics (macro-F1, confusion matrix) either way.
+- **Small fault classes.** Each synthetic capture has only 1–5 faulty flows.
+  Add runs without touching the existing ones:
+  `capture_faults.sh --runs 38 --start-run 13 --seed 2018` (r013–r050).
+
+CIC-IDS2017 flows are labelled from the attack schedule in
+`pcap_rca/dataset.py` (`CIC_SCHEDULE`): a flow between an attacker and a
+victim of an attack, on the attacked port, starting inside its time window.
+Attacks arriving from outside appear as `172.16.0.1` (the firewall's NAT);
+infected hosts talk to the attacker `205.174.165.73` directly. CIC's FTP and
+SSH brute force get the same `BRUTE_FORCE` label as the synthetic
+scenario, so one behaviour has one name. One deliberate deviation from
+CIC's schedule: the botnet's beacons are labelled
+`BOTNET` all Friday, because the bots kept calling their command server
+long after the documented 10:02–11:02 window (seen at 14:00 and 16:00).
+
+## 4. CIC-IDS2017
 
 Canadian Institute for Cybersecurity, 5 days of lab traffic (3–7 July 2017)
 with full payloads. Dataset page: <https://www.unb.ca/cic/datasets/ids-2017.html>.
@@ -208,7 +300,7 @@ victim is **192.168.10.50**.
 | Fri 16:00–16:05, DDoS LOIC | 361k | 10 s | `SCAN_OR_FLOOD`: "172.16.0.1 opened 25,224 connections to 192.168.10.50:80 in 300 s (84/s): a connection flood (DoS)", with the server's 23,870 resets and 6,610 retransmissions attributed to it |
 | Wed 09:50–10:00, DoS slowloris | 144k | 4.6 s | `SCAN_OR_FLOOD`: 1,987 connections at 3.3/s; the 773 SYNs the exhausted server never answered aren't misreported as a firewall |
 | Wed 10:45–10:50, DoS Hulk | 702k | 30 s | `SCAN_OR_FLOOD`: 45,626 connections at 158/s |
-| Tue 09:26–09:28, FTP-Patator | 776k | 81 s | **Missed**: 147 connections to FTP in 2 minutes is below the flood threshold. The clear signal (≈2,000 "530 Login incorrect" replies in 10 minutes) needs an FTP/auth-failure detector, which doesn't exist yet |
+| Tue 09:26–09:28, FTP-Patator | 776k | 81 s | `BRUTE_FORCE`: "172.16.0.1 failed to log in to FTP on 192.168.10.50:21 385 times over 133 connections". It was missed (147 connections is below the flood threshold) until the FTP/SMTP login-failure detector existed. Most of the slice's volume is two Windows Update downloads |
 
 Every slice also gets `CAPTURE_LOSS`. CIC's capture both drops packets and
 records many data segments *after* the ACK that covers them (capture skew,

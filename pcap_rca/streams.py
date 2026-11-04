@@ -28,6 +28,12 @@ from .parser import ACK, FIN, ICMP, RST, SYN, TCP, UDP, Packet
 
 C2S, S2C = 0, 1
 
+
+def side_name(direction: int) -> str:
+    """Which endpoint sent a packet travelling in `direction`."""
+    return "client" if direction == C2S else "server"
+
+
 Endpoint = tuple[str, int | None]
 
 

@@ -1,6 +1,6 @@
 import csv
 
-from builders import ACK, FIN, PSH, SYN, syn_options, tcp4, write_pcap
+from builders import ACK, FIN, PSH, RST, SYN, syn_options, tcp4, write_pcap
 from pcap_rca.cli import main
 from pcap_rca.features import (FLOW_FIELDS, PACKET_FIELDS, flow_features, packet_rows,
                                write_csv)
@@ -62,7 +62,7 @@ def test_write_csv_and_cli(tmp_path, capsys):
 def test_analyze_cli(tmp_path, capsys):
     import json
     frames = [tcp4(C, 40000, S, 81, 0.0, seq=1, flags=SYN),
-              tcp4(S, 81, C, 40000, 0.001, seq=0, ack=2, flags=0x14)]  # RST|ACK
+              tcp4(S, 81, C, 40000, 0.001, seq=0, ack=2, flags=RST | ACK)]
     path = write_pcap(tmp_path / "refused.pcap", frames)
     out_json, out_csv = tmp_path / "e.json", tmp_path / "e.csv"
     assert main(["analyze", str(path), "--json", str(out_json), "--csv", str(out_csv)]) == 0

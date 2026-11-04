@@ -53,6 +53,7 @@ TITLES = {
     "ABRUPT_TERMINATION": "Server aborts connections",
     "APP_ERRORS": "Server-side application errors",
     "TLS_FAILURE": "TLS handshakes fail",
+    "BRUTE_FORCE": "Password guessing (brute-force login attempts)",
 }
 
 # Extra next steps for TLS_FAILURE, by what went wrong.
@@ -119,6 +120,11 @@ NEXT_STEPS = {
                            "Look for crashes, restarts and resource limits (memory, file descriptors)"],
     "APP_ERRORS": ["Check application logs and backend health at those times"],
     "TLS_FAILURE": ["Reproduce with: openssl s_client -connect <server>:<port> -servername <name>"],
+    "BRUTE_FORCE": ["Block or rate-limit the source; lock out accounts after repeated failures "
+                    "(e.g. fail2ban)",
+                    "Replace clear-text FTP/SMTP logins with SFTP / SMTP over TLS: "
+                    "these passwords crossed the network readable",
+                    "Hand off to security: identify the source host"],
 }
 
 
@@ -287,6 +293,35 @@ def connection_flood(ctx: _Context) -> None:
                            "Enable SYN cookies and shorter header/body timeouts on the server "
                            "(slow-rate attacks such as slowloris hold connections open)",
                            "Hand off to security: identify the source host"]
+
+
+_LOGIN_OK = {"ftp": b"230", "smtp": b"235"}
+
+
+def brute_force(ctx: _Context) -> None:
+    """Many failed logins from one client to one service: password guessing."""
+    failures = ctx.get("AUTH_FAILURE")
+    for (src, svc), evs in _by(failures, lambda e: (e.src, _service(e))).items():
+        if len(evs) < ctx.cfg.brute_force_min_failures:
+            continue
+        flows = {e.stream_id for e in evs}
+        protocol = evs[0].subtype
+        ok_code = _LOGIN_OK.get(protocol, b"")
+        successes = sum(1 for stream in flows for p in ctx.capture.table.flows[stream].packets
+                        if p.src == svc[0] and p.payload_head.startswith(ok_code + b" "))
+        side_effects = [e for e in ctx.get(*_FLOOD_SYMPTOMS) if e.src == src and _service(e) == svc]
+        evidence = [f"{src} failed to log in to {protocol.upper()} on {endpoint(*svc)} "
+                    f"{len(evs)} times over {_plural(len(flows), 'connection')}"]
+        if successes:
+            evidence.append(f"{_plural(successes, 'login')} from {src} on those connections "
+                            "SUCCEEDED: the guessing may have found a valid password")
+        if side_effects:
+            evidence.append(f"Its other {_plural(len(side_effects), 'event')} on that service "
+                            "(refusals, resets...) are part of the same attack")
+        diag = ctx.add("BRUTE_FORCE", evs + side_effects, endpoint(*svc), HIGH, evidence)
+        if successes:
+            diag.next_steps = ["Treat the targeted account(s) as compromised: reset passwords now"] \
+                + diag.next_steps
 
 
 def capture_loss(ctx: _Context) -> None:
@@ -638,7 +673,8 @@ def high_latency_path(ctx: _Context) -> None:
         rtts = [e.metrics["irtt_ms"] for e in evs]
         clients = sorted({e.src for e in evs})
         shown = ", ".join(clients[:3]) + (f" and {len(clients) - 3} more" if len(clients) > 3 else "")
-        ctx.add("HIGH_LATENCY_PATH", evs, net, HIGH if len(flows) >= 3 else MEDIUM, [
+        confidence = HIGH if len(flows) >= 3 else MEDIUM if len(flows) == 2 else LOW
+        ctx.add("HIGH_LATENCY_PATH", evs, net, confidence, [
             f"Handshake RTT between {shown} and {net} was {median(rtts):.0f} ms (median of "
             f"{_plural(len(flows), 'connection')}, max {max(rtts):.0f} ms)"])
 
@@ -719,7 +755,7 @@ def app_errors(ctx: _Context) -> None:
                     [f"{endpoint(*svc)} returned {_plural(len(evs), '5xx response')}"])
 
 
-RULES = [scan_or_flood, capture_loss, resolver_unreachable, resolver_refused, resolver_failure,
+RULES = [scan_or_flood, brute_force, capture_loss, resolver_unreachable, resolver_refused, resolver_failure,
          dns_tcp_blocked, name_not_found, admin_block, no_route, routing_loop, host_unreachable,
          service_down, firewall_drop, mtu_mismatch, pmtu_blackhole, receiver_bottleneck,
          packet_reordering, path_loss, high_latency_path, slow_resolver, tls_failure,
