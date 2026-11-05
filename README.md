@@ -24,7 +24,8 @@ eye, using explicit, auditable detection rules instead of a black-box model.
 
 ## Installation
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt   # dependencies only; run with python -m pcap_rca.cli
+pip install .                     # or install the package and its `pcap-rca` command
 ```
 
 ## Usage
@@ -51,17 +52,21 @@ detector is also checked against their labels (`tests/test_ground_truth.py`).
 See [docs/architecture.md](docs/architecture.md) for the full pipeline.
 
 ## Status
-Early development.
+The rule-based pipeline is complete; the ML/DL phase is future work.
 
 - [x] PCAP/PCAPNG parsing, flow reconstruction, packet + flow feature export
 - [x] TCP, DNS, ICMP and HTTP/TLS event detectors
 - [x] Spatial-temporal aggregation (scope + burst/periodic/escalating patterns)
 - [x] Root-cause rules with confidence, evidence and next steps
-- All 27 synthetic fault scenarios: expected events and exactly the expected root cause
+- [x] All 27 synthetic fault scenarios: expected events and exactly the expected root cause
 - [x] Checked on CIC-IDS2017 slices: port scan, DDoS, DoS (Hulk, slowloris) and
       FTP brute force identified; results in data/README.md
 - [x] Labelled per-flow dataset builder for ML (synthetic faults + CIC attacks)
 - [ ] ML/DL phase
+
+## AI use
+AI assistants were used during development. The conversation logs and
+exports are in [Ai used/](Ai%20used/).
 
 ## License
 MIT
